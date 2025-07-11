@@ -13,6 +13,7 @@ from config import config
 from database.models import Base
 from database.crud import CRUD
 from sandbox_manager.docker_client import DockerClient # 自作のDockerClientクラス
+from sandbox_manager.service import SandboxManagerService # <-- 追加
 
 class CoreModule(Module):
     @singleton

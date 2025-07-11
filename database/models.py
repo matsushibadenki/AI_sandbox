@@ -3,9 +3,9 @@ from sqlalchemy import Column, Integer, String, DateTime, Text, Boolean, Enum
 from sqlalchemy.ext.declarative import declarative_base
 from datetime import datetime
 import enum
-from typing import Type # Type を追加 (Base を型ヒントで使う場合)
+from typing import Type, Any # Type と Any を追加
 
-Base = declarative_base()
+Base: Any = declarative_base() # type: ignore
 
 class SandboxStatus(enum.Enum):
     PENDING = "pending"
@@ -20,8 +20,7 @@ class Sandbox(Base):
 
     id = Column(String, primary_key=True) # サンドボックスのユニークID (UUIDなど)
     container_id = Column(String, nullable=True) # 実際のDockerコンテナID
-    # Enum の型ヒントを修正
-    status: SandboxStatus = Column(Enum(SandboxStatus), default=SandboxStatus.PENDING, nullable=False) # <-- 修正
+    status: SandboxStatus = Column(Enum(SandboxStatus), default=SandboxStatus.PENDING, nullable=False) # type: ignore # <-- 修正
     created_at = Column(DateTime, default=datetime.now, nullable=False)
     last_updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now, nullable=False)
     llm_agent_id = Column(String, nullable=False) # どのLLMエージェントが利用しているか

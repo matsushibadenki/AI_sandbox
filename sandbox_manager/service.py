@@ -41,11 +41,11 @@ class SandboxManagerService:
         if not self._docker_client.pull_image(base_image):
             # イメージが見つからないかプルに失敗した場合
             self._crud.update_sandbox_status(
-                sandbox_id,
-                SandboxStatus.FAILED,
+                str(sandbox_id),
+                SandboxStatus.FAILED, # <-- 修正
                 error_message=f"Failed to pull image: {base_image}"
             )
-            raise ValueError(f"Failed to pull Docker image: {base_image}")
+            raise ValueError(f"Failed to pull Docker image: {base_image}") # type: ignore
 
         # 3. Dockerコンテナを起動し、コードを実行
         # コードはファイルとしてマウントするか、直接コマンドとして渡すか。
@@ -65,11 +65,11 @@ class SandboxManagerService:
             # デフォルトまたは不明なイメージの場合の処理。エラーとするか、一般的なコマンドを実行するか。
             # ここではエラーとしています。
             self._crud.update_sandbox_status(
-                sandbox_id,
-                SandboxStatus.FAILED,
+                str(sandbox_id),
+                SandboxStatus.FAILED, # <-- 修正
                 error_message=f"Unsupported base image for code execution: {base_image}"
             )
-            raise ValueError(f"Unsupported base image for code execution: {base_image}. Only Python and Node.js are explicitly supported in this example.")
+            raise ValueError(f"Unsupported base image for code execution: {base_image}. Only Python and Node.js are explicitly supported in this example.") # type: ignore
 
         try:
             output, error, exit_code = self._docker_client.run_container(
@@ -87,7 +87,7 @@ class SandboxManagerService:
 
             # 4. 実行結果をデータベースに更新
             updated_sandbox = self._crud.update_sandbox_status(
-                sandbox_id=sandbox_entry.id, # <-- ここで Column オブジェクトではなく、sandbox_entry.id (str) を渡す
+                sandbox_id=str(sandbox_entry.id), # <-- ここで Column オブジェクトではなく、sandbox_entry.id (str) を渡す
                 status=status,
                 container_id=None,
                 execution_result=execution_result,
@@ -100,11 +100,11 @@ class SandboxManagerService:
         except Exception as e:
             print(f"SandboxManagerService: Error running sandbox {sandbox_id}: {e}")
             self._crud.update_sandbox_status(
-                sandbox_id=sandbox_id,
-                status=SandboxStatus.FAILED,
+                sandbox_id=str(sandbox_id),
+                status=SandboxStatus.FAILED, # <-- 修正
                 error_message=f"Execution error: {str(e)}"
             )
-            raise
+            raise # type: ignore
 
     def get_sandbox_status(self, sandbox_id: str) -> Optional[Sandbox]:
         """指定されたサンドボックスの状態を取得します。"""
@@ -123,7 +123,7 @@ class SandboxManagerService:
             # この例では、同じコードで新しいエントリを作成し直すシンプルな再生成
             try:
                 # 既存の破綻したエントリは非アクティブ化
-                self._crud.deactivate_sandbox(sandbox.id)
+                self._crud.deactivate_sandbox(str(sandbox.id)) # <-- 修正
                 print(f"SandboxManagerService: Deactivated old broken sandbox {sandbox.id}.")
                 # 新しいサンドボックスとして再作成・実行
                 self.create_and_run_sandbox(

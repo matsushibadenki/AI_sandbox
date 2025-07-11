@@ -12,7 +12,7 @@ from database.models import SandboxStatus
 class RunCodeInSandboxInput(BaseModel):
     llm_agent_id: str = Field(description="The unique ID of the LLM agent requesting the sandbox operation.")
     code: str = Field(description="The Python or Node.js code to execute in the sandbox.")
-    base_image: str = Field(default=None, description="Optional. The Docker image to use for the sandbox (e.g., 'python:3.10-slim-bookworm', 'node:18'). Defaults to system config if not provided.")
+    base_image: Optional[str] = Field(default=None, description="Optional. The Docker image to use for the sandbox (e.g., 'python:3.10-slim-bookworm', 'node:18'). Defaults to system config if not provided.") # <-- 修正
 
 
 class SandboxTool(BaseTool):
@@ -46,7 +46,7 @@ class SandboxTool(BaseTool):
             try:
                 parsed_data = json.loads(parsed_data['llm_agent_id'])
             except json.JSONDecodeError as e:
-                return f"Error: Failed to parse nested JSON string in Action Input: {parsed_data['llm_agent_id']} - {e}\nFull text: {text}"
+                return f"Error: Failed to parse nested JSON string in Action Input: {parsed_data['llm_agent_id']} - {e}\nFull text: {tool_input}" # <-- 修正
         
         try:
             validated_input = RunCodeInSandboxInput.model_validate(parsed_data)

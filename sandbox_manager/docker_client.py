@@ -70,8 +70,8 @@ class DockerClient:
         except ContainerError as e:
             print(f"DockerClient: Container {name} exited with error: {e}")
             exit_code = e.exit_status
-            output = e.stdout.decode('utf-8')
-            error = e.stderr.decode('utf-8')
+            output = e.stdout.decode('utf-8') # type: ignore
+            error = e.stderr.decode('utf-8') # type: ignore
         except APIError as e:
             print(f"DockerClient: Docker API error for container {name}: {e}")
             error = str(e)
