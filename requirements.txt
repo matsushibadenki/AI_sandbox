@@ -8,3 +8,4 @@ psycopg2-binary
 docker
 langchain-ollama
 types-docker
+watchdog
