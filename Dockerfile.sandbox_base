@@ -1,4 +1,4 @@
-# program_builder/Dockerfile.sandbox_base
+# AI_sandbox/Dockerfile.sandbox_base
 # Catalogに登録するイメージの例 (Python)
 FROM python:3.10-slim-bookworm
 

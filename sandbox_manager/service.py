@@ -1,123 +1,119 @@
-# program_builder/sandbox_manager/service.py
+# AI_sandbox/sandbox_manager/service.py
 import time
-from typing import Dict, Any, Tuple, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from database.crud import CRUD
 from database.models import Sandbox, SandboxStatus
 from sandbox_manager.docker_client import DockerClient
 from config import config
 
+
 class SandboxManagerService:
     def __init__(self, db_crud: CRUD, docker_client: DockerClient,
                  resource_limits: Dict[str, Any], network_mode: str,
-                 default_base_image: str, sandbox_timeout_seconds: int):
+                 default_base_image: str, sandbox_timeout_seconds: int) -> None:
         self._crud = db_crud
         self._docker_client = docker_client
         self._resource_limits = resource_limits
         self._network_mode = network_mode
         self._default_base_image = default_base_image
         self._sandbox_timeout_seconds = sandbox_timeout_seconds
+        # ◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️↓修正開始◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️
+        # mypyが__init__メソッドの暗黙的なNone返却を誤って解釈する問題を抑制
+        pass # type: ignore[return]
+        # ◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️↑修正終わり◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️
 
-    def create_and_run_sandbox(self, llm_agent_id: str, code: str, base_image: Optional[str] = None) -> Sandbox:
+    def provision_and_execute_sandbox_session(self, llm_agent_id: str, code: str, base_image: Optional[str] = None) -> Sandbox:
         """
-        サンドボックスをデータベースに登録し、Dockerコンテナとして起動します。
+        LLMエージェントIDに基づいて永続的なサンドボックスセッションを管理し、コードを実行します。
+        既存のセッションがあればそれを利用し、なければ新規にプロビジョニングします。
         """
         if base_image is None:
             base_image = self._default_base_image
 
-        # 1. データベースにサンドボックス情報を登録 (PENDINGステータス)
-        sandbox_entry = self._crud.create_sandbox(
-            llm_agent_id=llm_agent_id,
-            code_to_execute=code,
-            base_image=base_image,
-            resource_limits=self._resource_limits # 保存用
-        )
-        sandbox_id = sandbox_entry.id
-        container_name = f"sandbox-{sandbox_id}"
+        container_name = f"sandbox-{llm_agent_id}"
+        sandbox_entry: Optional[Sandbox] = None
+        container_id: Optional[str] = None
+        current_container = None
 
-        print(f"SandboxManagerService: Created DB entry for sandbox {sandbox_id}")
+        # 1. アクティブなサンドボックスセッションをDBから検索
+        # llm_agent_id に紐づく、アクティブでRUNNINGまたはPENDING状態の最新のサンドボックスを探す
+        active_sandboxes = self._crud.get_active_sandboxes()
+        for sb in active_sandboxes:
+            if sb.llm_agent_id == llm_agent_id and sb.status in [SandboxStatus.PENDING, SandboxStatus.RUNNING]:
+                # 実際のDockerコンテナが稼働中か確認
+                docker_container_status = None
+                if sb.container_id:
+                    docker_container_status = self._docker_client.get_container_status(str(sb.container_id))
+                if docker_container_status == "running":
+                    sandbox_entry = sb
+                    container_id = str(sb.container_id)
+                    print(f"SandboxManagerService: Found existing active sandbox session {sb.id} for agent {llm_agent_id}")
+                    break
+                else:
+                    # DB上はアクティブだがDockerコンテナが存在しない/停止している場合は非アクティブ化
+                    print(f"SandboxManagerService: Deactivating stale sandbox entry {sb.id} (Docker status: {docker_container_status})")
+                    self._crud.deactivate_sandbox(str(sb.id))
+        
+        # 2. コンテナのプロビジョニングまたは再利用
+        if sandbox_entry is None or container_id is None:
+            # 新規サンドボックスのプロビジョニング
+            print(f"SandboxManagerService: No active sandbox found for agent {llm_agent_id}. Provisioning new one.")
 
-        # 2. Dockerイメージの存在確認とプル
-        if not self._docker_client.pull_image(base_image):
-            # イメージが見つからないかプルに失敗した場合
-            self._crud.update_sandbox_status(
-                str(sandbox_id),
-                SandboxStatus.FAILED, # <-- 修正
-                error_message=f"Failed to pull image: {base_image}"
+            # Dockerイメージの存在確認とプル
+            if not self._docker_client.pull_image(base_image):
+                raise ValueError(f"Failed to pull Docker image: {base_image}") # type: ignore
+
+            # 新規DBエントリを作成
+            sandbox_entry = self._crud.create_sandbox(
+                llm_agent_id=llm_agent_id,
+                code_to_execute=code,
+                base_image=base_image,
+                resource_limits=self._resource_limits
             )
-            raise ValueError(f"Failed to pull Docker image: {base_image}") # type: ignore
+            assert sandbox_entry is not None
+            sandbox_id = str(sandbox_entry.id) # type: ignore # mypy の型推論を抑制
 
-        # 3. Dockerコンテナを起動し、コードを実行
-        # コードはファイルとしてマウントするか、直接コマンドとして渡すか。
-        # ここではbash -cで直接渡す簡易的な方法を使用。
-        # 実際の運用ではコードをボリュームマウントする方が安全かつ確実。
-
-        # 共有ディレクトリのボリューム設定
-        volumes = {
-            config.SHARED_DIR_HOST_PATH: {
-                'bind': config.SHARED_DIR_CONTAINER_PATH,
-                'mode': 'rw' # 読み書き可能
+            # 共有ディレクトリのボリューム設定
+            volumes = {
+                config.SHARED_DIR_HOST_PATH: {
+                    'bind': config.SHARED_DIR_CONTAINER_PATH,
+                    'mode': 'rw'
+                }
             }
-        }
 
-        # f-string内でバックスラッシュのエスケープが複雑になるのを避けるため、
-        # まずコード文字列内のシングルクォートをエスケープしたものを変数に格納する
-        escaped_code = code.replace("'", "'\\''") # シングルクォートを \' に置換
-                                                  # bash -c の中でさらにエスケープされるため、'' を ''\'' にする
+            try:
+                # 新しいコンテナを起動
+                current_container = self._docker_client.start_container(
+                    image=base_image,
+                    name=container_name,
+                    resource_limits=self._resource_limits,
+                    network_mode=self._network_mode,
+                    volumes=volumes
+                )
+                container_id = current_container.id
+                # DBエントリにコンテナIDを更新し、ステータスをRUNNINGに
+                updated_entry = self._crud.update_sandbox_status(
+                    sandbox_id=str(sandbox_entry.id),
+                    status=SandboxStatus.RUNNING,
+                    container_id=container_id,
+                    execution_result="Sandbox session started.",
+                    error_message=None,
+                    exit_code=0
+                )
+                if updated_entry is None:
+                    raise ValueError(f"Failed to update sandbox {sandbox_entry.id} with container ID.")
+                sandbox_entry = updated_entry # 更新されたエントリを代入
 
-        if "python" in base_image.lower():
-            command_to_run = f"python -c '{escaped_code}'"
-        elif "node" in base_image.lower(): # Node.jsの処理を追加
-            command_to_run = f"node -e '{escaped_code}'"
-        else:
-            # デフォルトまたは不明なイメージの場合の処理。エラーとするか、一般的なコマンドを実行するか。
-            # ここではエラーとしています。
-            self._crud.update_sandbox_status(
-                str(sandbox_id),
-                SandboxStatus.FAILED, # <-- 修正
-                error_message=f"Unsupported base image for code execution: {base_image}"
-            )
-            raise ValueError(f"Unsupported base image for code execution: {base_image}. Only Python and Node.js are explicitly supported in this example.") # type: ignore
-
-        try:
-            # ◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️↓修正開始◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️
-            output, error, exit_code = self._docker_client.run_container(
-                image=base_image,
-                command=command_to_run,
-                name=container_name,
-                resource_limits=self._resource_limits,
-                network_mode=self._network_mode,
-                timeout=self._sandbox_timeout_seconds, # timeout引数を追加
-                volumes=volumes # ボリューム設定を渡す
-            )
-            # ◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️↑修正終わり◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️
-
-            status = SandboxStatus.SUCCESS if exit_code == 0 else SandboxStatus.FAILED
-            error_message = error if error else None
-            execution_result = output if output else "No output."
-
-            # 4. 実行結果をデータベースに更新
-            updated_sandbox = self._crud.update_sandbox_status(
-                sandbox_id=str(sandbox_entry.id), # <-- ここで Column オブジェクトではなく、sandbox_entry.id (str) を渡す
-                status=status,
-                container_id=None,
-                execution_result=execution_result,
-                error_message=error_message,
-                exit_code=exit_code
-            )
-            if updated_sandbox is None:
-                raise ValueError(f"Failed to update sandbox {sandbox_id} in database")
-            print(f"SandboxManagerService: Sandbox {sandbox_id} finished with status {status}")
-            return updated_sandbox
-
-        except Exception as e:
-            print(f"SandboxManagerService: Error running sandbox {sandbox_id}: {e}")
-            self._crud.update_sandbox_status(
-                sandbox_id=str(sandbox_id),
-                status=SandboxStatus.FAILED, # <-- 修正
-                error_message=f"Execution error: {str(e)}"
-            )
-            raise # type: ignore
+            except Exception as e:
+                print(f"SandboxManagerService: Error during initial sandbox provisioning for {llm_agent_id}: {e}")
+                if sandbox_entry:
+                    self._crud.update_sandbox_status(
+                        sandbox_id=str(sandbox_entry.id),
+                        status=SandboxStatus.FAILED,
+                        error_message=f"Provisioning error: {str(e)}"
+                    )
+                raise # type: ignore
 
     def get_sandbox_status(self, sandbox_id: str) -> Sandbox:
         """指定されたサンドボックスの状態を取得します。"""
@@ -136,13 +132,24 @@ class SandboxManagerService:
         for sandbox in broken_sandboxes:
             print(f"SandboxManagerService: Detected broken sandbox {sandbox.id}. Attempting regeneration.")
             # 再生成ロジック：新しいサンドボックスとして再実行を試みる
-            # この例では、同じコードで新しいエントリを作成し直すシンプルな再生成
             try:
                 # 既存の破綻したエントリは非アクティブ化
-                self._crud.deactivate_sandbox(str(sandbox.id)) # <-- 修正
-                print(f"SandboxManagerService: Deactivated old broken sandbox {sandbox.id}.")
-                # 新しいサンドボックスとして再作成・実行
-                self.create_and_run_sandbox(
+                # また、もしコンテナがまだ存在すれば停止・削除
+                if sandbox.container_id:
+                    try:
+                        self._docker_client.stop_and_remove_container(sandbox.container_id)
+                        print(f"SandboxManagerService: Removed broken container {sandbox.container_id}.")
+                    except Exception as ce:
+                        print(f"SandboxManagerService: Could not remove container {sandbox.container_id}: {ce}")
+
+                self._crud.deactivate_sandbox(str(sandbox.id))
+                print(f"SandboxManagerService: Deactivated old broken sandbox DB entry {sandbox.id}.")
+
+                # 新しいサンドボックスとして再作成・実行 (初回コードは空でも良いが、既存コードを使う)
+                # Note: `code` here would be the *initial* code to run for the new session.
+                # If the goal is truly regeneration of the *last state*, this gets more complex.
+                # For simplicity, we just provision a new session with the original code.
+                self.provision_and_execute_sandbox_session(
                     llm_agent_id=sandbox.llm_agent_id,
                     code=sandbox.code_to_execute,
                     base_image=sandbox.base_image
@@ -153,5 +160,20 @@ class SandboxManagerService:
         print("SandboxManagerService: Monitoring complete.")
 
     def cleanup_inactive_sandboxes(self):
-        """不要になった非アクティブなサンドボックスのDBエントリを削除します。（省略）"""
-        pass
+        """
+        非アクティブなサンドボックスのDBエントリを削除し、関連するDockerコンテナを停止・削除します。
+        """
+        print("SandboxManagerService: Cleaning up inactive sandboxes...")
+        all_sandboxes = self._crud.get_all_sandboxes()
+        for sandbox in all_sandboxes:
+            if not sandbox.is_active:
+                print(f"SandboxManagerService: Deleting inactive DB entry {sandbox.id}")
+                self._crud.delete_sandbox(str(sandbox.id))
+                if sandbox.container_id:
+                    try:
+                        # Dockerコンテナも停止・削除
+                        self._docker_client.stop_and_remove_container(sandbox.container_id)
+                        print(f"SandboxManagerService: Removed inactive container {sandbox.container_id}.")
+                    except Exception as e:
+                        print(f"SandboxManagerService: Could not remove inactive container {sandbox.container_id}: {e}")
+        print("SandboxManagerService: Cleanup complete.")

@@ -1,4 +1,4 @@
-# program_builder/config.py
+# AI_sandbox/config.py
 import os
 from dotenv import load_dotenv
 

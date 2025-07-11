@@ -1,11 +1,13 @@
-# program_builder/database/crud.py
-from sqlalchemy.orm import Session, sessionmaker
-from sqlalchemy.exc import SQLAlchemyError
-from typing import Optional, Dict
-import uuid
+# AI_sandbox/database/crud.py
 import json
+import uuid
+from typing import Dict, Optional
+
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session, sessionmaker
 
 from database.models import Sandbox, SandboxStatus
+
 
 class CRUD:
     def __init__(self, session_maker: sessionmaker):
@@ -62,8 +64,27 @@ class CRUD:
 
     def get_active_sandboxes(self) -> list[Sandbox]:
         with self.SessionLocal() as session:
-            return session.query(Sandbox).filter(Sandbox.is_active == True).all()
+            # Active means is_active=True AND status is not FAILED/SUCCESS/STOPPED (i.e., still potentially usable)
+            return session.query(Sandbox).filter(
+                Sandbox.is_active == True,
+                # ◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️↓修正開始◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️
+                Sandbox.status.in_([SandboxStatus.PENDING, SandboxStatus.RUNNING, SandboxStatus.REGENERATING]) # type: ignore[attr-defined]
+                # ◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️↑修正終わり◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️
+            ).all()
 
     def get_broken_sandboxes(self) -> list[Sandbox]:
         with self.SessionLocal() as session:
             return session.query(Sandbox).filter(Sandbox.status == SandboxStatus.FAILED, Sandbox.is_active == True).all()
+
+    def get_all_sandboxes(self) -> list[Sandbox]:
+        with self.SessionLocal() as session:
+            return session.query(Sandbox).all()
+
+    def delete_sandbox(self, sandbox_id: str) -> bool:
+        with self.SessionLocal() as session:
+            db_sandbox = session.query(Sandbox).filter(Sandbox.id == sandbox_id).first()
+            if db_sandbox:
+                session.delete(db_sandbox)
+                session.commit()
+                return True
+            return False
