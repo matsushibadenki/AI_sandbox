@@ -1,0 +1,10 @@
+# program_builder/requirements.txt
+langchain
+langchain-community
+python-dotenv
+injector
+SQLAlchemy
+psycopg2-binary 
+docker
+langchain-ollama
+types-docker
