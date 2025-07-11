@@ -94,6 +94,8 @@ class SandboxManagerService:
                 error_message=error_message,
                 exit_code=exit_code
             )
+            if updated_sandbox is None:
+                raise ValueError(f"Failed to update sandbox {sandbox_id} in database")
             print(f"SandboxManagerService: Sandbox {sandbox_id} finished with status {status}")
             return updated_sandbox
 
@@ -106,9 +108,12 @@ class SandboxManagerService:
             )
             raise # type: ignore
 
-    def get_sandbox_status(self, sandbox_id: str) -> Optional[Sandbox]:
+    def get_sandbox_status(self, sandbox_id: str) -> Sandbox:
         """指定されたサンドボックスの状態を取得します。"""
-        return self._crud.get_sandbox(sandbox_id)
+        sandbox = self._crud.get_sandbox(sandbox_id)
+        if sandbox is None:
+            raise ValueError(f"Sandbox with id '{sandbox_id}' not found")
+        return sandbox
 
     def monitor_and_regenerate_broken_sandboxes(self):
         """
