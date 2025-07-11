@@ -24,6 +24,6 @@ class Config:
     # ユーザーとの共有ディレクトリ設定
     # ホストOS上のパスとコンテナ内のマウントポイント
     SHARED_DIR_HOST_PATH: str = os.getenv("SHARED_DIR_HOST_PATH", "./shared_files")
-    SHARED_DIR_CONTAINER_PATH: str = "./share_area" # コンテナ内のマウントポイント
+    SHARED_DIR_CONTAINER_PATH: str = "/share_area" # コンテナ内のマウントポイント
 
 config = Config()
