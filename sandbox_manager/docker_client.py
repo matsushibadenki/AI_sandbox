@@ -5,6 +5,10 @@ from typing import Any, Dict, Optional, Tuple
 import docker
 from docker.errors import APIError, ContainerError, ImageNotFound, NotFound
 from docker.models.containers import Container
+# ◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️↓修正開始◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️
+import os
+import uuid
+# ◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️↑修正終わり◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️
 
 
 class DockerClient:
@@ -51,27 +55,135 @@ class DockerClient:
         except APIError as e:
             raise Exception(f"Failed to start container {name}: {e}")
 
+    # ◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️↓修正開始◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️
+    def exec_code_in_container(self, container_id: str, code_string: str, base_image: str, timeout: int) -> Tuple[Optional[str], Optional[str], Optional[int]]:
+        """
+        既存の実行中コンテナ内で提供されたコードを実行し、その結果を返します。
+        コードは一時ファイルに書き込まれ、適切なインタプリタで実行されます。
+        """
+        output = None
+        error = None
+        exit_code = None
+        temp_filename = f"temp_script_{uuid.uuid4().hex}"
+        
+        # Determine the interpreter and file extension based on the base_image
+        interpreter = ""
+        file_extension = ""
+        if "python" in base_image:
+            interpreter = "python"
+            file_extension = ".py"
+        elif "node" in base_image:
+            interpreter = "node"
+            file_extension = ".js"
+        else:
+            # Fallback to bash for generic images, but warn
+            print(f"DockerClient: Warning: Unknown base image '{base_image}'. Attempting to execute with bash.")
+            interpreter = "bash"
+            file_extension = ".sh" # or no extension, depending on the script nature
+
+        script_path_in_container = os.path.join("/share_area", temp_filename + file_extension)
+
+        try:
+            container = self._client.containers.get(container_id)
+            print(f"DockerClient: Preparing to execute code in container {container_id} using {interpreter}...")
+
+            # 1. Write the code to a temporary file in the container's shared directory
+            # Use printf for better handling of newlines and special characters than echo
+            # Escape single quotes in the code_string for shell command
+            escaped_code_string = code_string.replace("'", "'\\''")
+            write_command = f"printf '%s' '{escaped_code_string}' > {script_path_in_container}"
+            
+            print(f"DockerClient: Writing code to {script_path_in_container}...")
+            write_result = container.exec_run(
+                cmd=f"bash -c \"{write_command}\"",
+                demux=True,
+                tty=False,
+                detach=False
+            )
+            if write_result.exit_code != 0:
+                stdout_bytes, stderr_bytes = write_result.output
+                write_error = stderr_bytes.decode('utf-8') if stderr_bytes else "Unknown write error."
+                return None, f"Failed to write script to container: {write_error}", write_result.exit_code
+
+            # 2. Execute the temporary file
+            execution_command = ""
+            if interpreter == "python":
+                execution_command = f"{interpreter} {script_path_in_container}"
+            elif interpreter == "node":
+                execution_command = f"{interpreter} {script_path_in_container}"
+            elif interpreter == "bash":
+                # For generic bash, ensure it's executable first, then run
+                chmod_cmd = f"chmod +x {script_path_in_container}"
+                chmod_result = container.exec_run(cmd=f"bash -c \"{chmod_cmd}\"", demux=True)
+                if chmod_result.exit_code != 0:
+                    return None, f"Failed to make script executable: {chmod_result.output[1].decode('utf-8')}", chmod_result.exit_code
+                execution_command = f"bash {script_path_in_container}" # Explicitly run with bash
+
+            print(f"DockerClient: Executing script in container {container_id}: {execution_command}")
+            exec_result = container.exec_run(
+                cmd=f"bash -c \"{execution_command}\"",
+                stream=False,
+                demux=True,
+                tty=False,
+                detach=False,
+                # timeout=timeout # exec_run does not support timeout argument directly
+            )
+            stdout_bytes, stderr_bytes = exec_result.output
+            exit_code = exec_result.exit_code
+            output = stdout_bytes.decode('utf-8') if stdout_bytes else None
+            error = stderr_bytes.decode('utf-8') if stderr_bytes else None
+
+            print(f"DockerClient: Script execution in {container_id} finished with exit code {exit_code}")
+            if output:
+                print(f"DockerClient: Output: {output.strip()}")
+            if error:
+                print(f"DockerClient: Error: {error.strip()}")
+            return output, error, exit_code
+
+        except NotFound:
+            error = f"Container {container_id} not found."
+            print(f"DockerClient: {error}")
+            return None, error, -1
+        except APIError as e:
+            error = f"Docker API error executing command in {container_id}: {e}"
+            print(f"DockerClient: {error}")
+            return None, error, -1
+        except Exception as e:
+            error = f"Unexpected error executing command in {container_id}: {e}"
+            print(f"DockerClient: {error}")
+            return None, error, -2
+        finally:
+            # Clean up the temporary script file
+            if script_path_in_container:
+                try:
+                    container = self._client.containers.get(container_id)
+                    cleanup_command = f"rm -f {script_path_in_container}"
+                    print(f"DockerClient: Cleaning up temporary script: {cleanup_command}")
+                    container.exec_run(cmd=f"bash -c \"{cleanup_command}\"", demux=True)
+                except Exception as e:
+                    print(f"DockerClient: Error during temporary script cleanup: {e}")
+
+    # Old exec_command_in_container is no longer used for code execution,
+    # but might be kept for general shell commands if needed.
+    # For now, it is replaced by exec_code_in_container.
     def exec_command_in_container(self, container_id: str, command: str, timeout: int) -> Tuple[Optional[str], Optional[str], Optional[int]]:
         """
-        既存の実行中コンテナ内でコマンドを実行し、その結果を返します。
+        既存の実行中コンテナ内で汎用シェルコマンドを実行し、その結果を返します。
+        このメソッドは、exec_code_in_container とは異なり、渡されたコマンドを直接 bash で実行します。
         """
         output = None
         error = None
         exit_code = None
         try:
             container = self._client.containers.get(container_id)
-            print(f"DockerClient: Executing command in container {container_id}: {command}")
-            # exec_run はコマンド実行と出力を取得する
-            # ◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️↓修正開始◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️
+            print(f"DockerClient: Executing generic command in container {container_id}: {command}")
             exec_result = container.exec_run(
                 cmd=f"bash -c \"{command}\"",
-                stream=False, # Trueにするとストリームで受け取るが、ここではシンプルに
-                demux=True, # stdoutとstderrを分離
-                tty=False, # TTYを割り当てない
+                stream=False,
+                demux=True,
+                tty=False,
                 detach=False,
-                # timeout=timeout # exec_run は timeout 引数をサポートしていません
             )
-            # ◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️↑修正終わり◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️
             stdout_bytes, stderr_bytes = exec_result.output
             exit_code = exec_result.exit_code
             output = stdout_bytes.decode('utf-8') if stdout_bytes else None
@@ -95,6 +207,7 @@ class DockerClient:
             error = f"Unexpected error executing command in {container_id}: {e}"
             print(f"DockerClient: {error}")
             return None, error, -2
+    # ◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️↑修正終わり◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️
 
     def get_container_status(self, container_id: str) -> Optional[str]:
         try:
