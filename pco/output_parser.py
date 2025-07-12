@@ -25,25 +25,18 @@ class CustomAgentOutputParser(AgentOutputParser):
 
         # Action / Action Input のパターンを検索
         # LLMが出力する可能性のある複数の形式に対応
-        action_match = re.search(r"Action:\s*(.*?)\nAction Input:\s*(.*)", text, re.DOTALL)
+        # re.DOTALL は . が改行にもマッチするようにする
+        action_match = re.search(r"Action:\s*(.*?)\nAction Input:\s*(\{.*\})", text, re.DOTALL)
 
         if action_match:
             action = action_match.group(1).strip()
-            action_input_str = action_match.group(2).strip()
+            action_input_str = action_match.group(2).strip() # ここでJSON部分のみを厳密にキャプチャ
 
             # Action Input の JSON を堅牢にパース
             try:
-                # ```json ... ``` のようなコードブロックで囲まれている場合を考慮
-                json_block_match = re.search(r"```json\n(.*)\n```", action_input_str, re.DOTALL)
-                if json_block_match:
-                    action_input_json_str = json_block_match.group(1).strip()
-                else:
-                    action_input_json_str = action_input_str
+                action_input = json.loads(action_input_str)
 
-                action_input = json.loads(action_input_json_str)
-
-                # LLMが不正確なJSONを吐き出し、それがネストしている場合（過去のエラーログを考慮）
-                # 例: {'llm_agent_id': '{"code": "...", "base_image": "..."}'}
+                # 過去のネストしたJSONエラー (llm_agent_id内にJSONがある) にも引き続き対応
                 if (
                     isinstance(action_input, dict) and
                     len(action_input) == 1 and
@@ -58,7 +51,9 @@ class CustomAgentOutputParser(AgentOutputParser):
                         raise OutputParserException(f"Failed to parse nested JSON in Action Input: {action_input['llm_agent_id']} - {e}\nFull text: {text}")
 
             except json.JSONDecodeError as e:
-                raise OutputParserException(f"Could not parse Action Input as JSON: {action_input_str} - {e}\nFull text: {text}")
+                # JSONパースエラーの場合、エラーメッセージに「Extra data」が含まれることがある
+                # これは正規表現でJSONブロックをより厳密にキャプチャすることで防ぐ
+                raise OutputParserException(f"Could not parse Action Input as valid JSON: {action_input_str} - {e}\nFull text: {text}")
             except Exception as e:
                 raise OutputParserException(f"Unexpected error during Action Input parsing: {e}\nFull text: {text}")
 
@@ -66,7 +61,10 @@ class CustomAgentOutputParser(AgentOutputParser):
             return AgentAction(tool=action, tool_input=action_input, log=text)
 
         # どちらのパターンにもマッチしない場合
-        raise OutputParserException(f"Could not parse LLM output: {text}")
+        # AIがThoughtだけを言ったり、Actionのフォーマットを間違えたりした場合にここに到達する
+        # この場合、LLMに直接応答を返すか、再試行を促す
+        # LangChainのエージェントExecutorは、OutputParserExceptionを受け取ると通常は再試行する
+        raise OutputParserException(f"Could not parse LLM output: No valid Action/Action Input or Final Answer found. Full text:\n{text}")
 
     @property
     def _type(self) -> str:

@@ -3,13 +3,18 @@
 FROM python:3.10-slim-bookworm
 
 # 必要なツールやライブラリを追加する場合
-# RUN pip install requests pandas numpy # 必要に応じて
+# サンドボックスツールが利用する標準コマンドをインストール
+# curl, wget はダウンロード/アップロードツールのために必要
+# procpsはps, freeコマンドを提供
+# findutilsはfindコマンドを提供
+# grepはgrepコマンドを提供
+# xxd (vim-common) はWriteFileToolの安全なファイル書き込みに必要
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl wget procps findutils grep vim-common && \
+    rm -rf /var/lib/apt/lists/*
+
+# コンテナが常に稼働し続けるようにする
+# サンドボックスセッションの永続性のために必須
+ENTRYPOINT ["/bin/bash", "-c", "while true; do sleep 1000; done"]
 
 WORKDIR /app
-
-# エントリポイントは、LLMが提供するコードを直接実行するように設定
-# コンテナが起動時に何もせず、外部からコマンドを受け付けるようにする
-ENTRYPOINT ["bash", "-c"]
-# 例えば、CMD ["sleep", "infinity"] としておき、
-# docker run -it --rm my-sandbox bash -c "python -c 'print(\"hello\")'" のようにコマンドを渡す
-# SandboxManagerServiceが run_container で command を渡すため、ENTRYPOINTはシンプルで良い。

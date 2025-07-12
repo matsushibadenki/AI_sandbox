@@ -1,6 +1,7 @@
 # AI_sandbox/pco/tools.py
 import json
-import uuid # <-- 先頭に移動: here-document のユニークなマーカー生成用
+import uuid
+import os 
 from typing import Any, Dict, Optional, Type, Union
 
 from langchain.tools import BaseTool
@@ -54,6 +55,51 @@ class DiagnoseSandboxExecutionInput(BaseModel):
 class ListDiskSpaceInput(BaseModel):
     llm_agent_id: str = Field(description="The unique ID of the LLM agent for the persistent sandbox session.")
 
+class DownloadFileInput(BaseModel):
+    llm_agent_id: str = Field(description="The unique ID of the LLM agent for the persistent sandbox session.")
+    url: str = Field(description="The URL of the file to download (e.g., 'https://example.com/data.json').")
+    destination_path: str = Field(description="The path in the shared directory where the file should be saved (e.g., 'downloaded_data/data.json').")
+    headers: Optional[str] = Field(default=None, description="Optional. A JSON string of HTTP headers to include (e.g., '{{\"Authorization\": \"Bearer token\"}}').")
+    method: str = Field(default="GET", description="Optional. The HTTP method to use (e.g., 'GET', 'POST'). Defaults to 'GET'.")
+    base_image: Optional[str] = Field(default=None, description="Optional. The Docker image to use for the sandbox. It should include `curl`. Defaults to system config if not provided.")
+
+class UploadFileInput(BaseModel):
+    llm_agent_id: str = Field(description="The unique ID of the LLM agent for the persistent sandbox session.")
+    file_path: str = Field(description="The path to the file in the shared directory to upload (e.g., 'my_results.txt').")
+    destination_url: str = Field(description="The URL to upload the file to (e.g., 'https://api.example.com/upload').")
+    headers: Optional[str] = Field(default=None, description="Optional. A JSON string of HTTP headers to include (e.g., '{{\"Content-Type\": \"application/json\"}}').")
+    method: str = Field(default="POST", description="Optional. The HTTP method to use (e.g., 'POST', 'PUT'). Defaults to 'POST'.")
+    base_image: Optional[str] = Field(default=None, description="Optional. The Docker image to use for the sandbox. It should include `curl`. Defaults to system config if not provided.")
+
+class DownloadWebpageRecursivelyInput(BaseModel):
+    llm_agent_id: str = Field(description="The unique ID of the LLM agent for the persistent sandbox session.")
+    url: str = Field(description="The base URL of the webpage to download (e.g., 'https://example.com/blog').")
+    destination_dir: str = Field(description="The path in the shared directory where the downloaded content should be saved (e.g., 'downloaded_blog').")
+    max_depth: int = Field(default=5, description="Optional. Maximum recursion depth for downloading linked resources. Defaults to 5. Set to 0 for just the base page.")
+    accept_regex: Optional[str] = Field(default=None, description="Optional. A regex pattern to filter files to download (e.g., '.(html|css|js|png|jpg|gif)$').")
+    base_image: Optional[str] = Field(default=None, description="Optional. The Docker image to use for the sandbox. It should include `wget`. Defaults to system config if not provided.")
+
+class FindFilesInSandboxInput(BaseModel):
+    llm_agent_id: str = Field(description="The unique ID of the LLM agent for the persistent sandbox session.")
+    search_path: str = Field(description="The path within the shared directory to start the search (e.g., '.', 'my_project/src').")
+    name_pattern: Optional[str] = Field(default=None, description="Optional. A pattern to match file names (e.g., '*.py', 'test_*.js').")
+    file_type: Optional[str] = Field(default=None, description="Optional. Type of file to search for ('f' for file, 'd' for directory, 'l' for symbolic link).")
+    max_depth: Optional[int] = Field(default=None, description="Optional. Maximum depth of directories to search.")
+
+class GrepFileContentInSandboxInput(BaseModel):
+    llm_agent_id: str = Field(description="The unique ID of the LLM agent for the persistent sandbox session.")
+    file_path: str = Field(description="The path to the file or directory (relative to shared directory) to search within. If a directory, `recursive` must be true.")
+    pattern: str = Field(description="The string or regex pattern to search for.")
+    recursive: bool = Field(default=False, description="If true, searches recursively within directories.")
+    case_insensitive: bool = Field(default=False, description="If true, performs a case-insensitive search.")
+    line_numbers: bool = Field(default=False, description="If true, prints line numbers with output.")
+
+class GetSystemInfoInput(BaseModel):
+    llm_agent_id: str = Field(description="The unique ID of the LLM agent for the persistent sandbox session.")
+    info_type: str = Field(
+        description="Type of system information to retrieve: 'os_and_cpu' (OS type, kernel, CPU info), 'memory' (memory usage)."
+    )
+
 
 class SandboxTool(BaseTool):
     name: str = "run_code_in_sandbox"
@@ -97,12 +143,12 @@ class ReadFileTool(BaseTool):
 
     def _run(self, llm_agent_id: str, file_path: str, run_manager: Optional[RunnableConfig] = None) -> str:
         full_path = f"{config.SHARED_DIR_CONTAINER_PATH}/{file_path.lstrip('/')}"
-        command = f"cat {full_path}"
+        command = f"cat \"{full_path}\"" # パスをダブルクォートで囲む
         print(f"ReadFileTool: LLM agent {llm_agent_id} requested to read file: {full_path}")
         try:
             sandbox_entry = self.sandbox_manager_service.provision_and_execute_sandbox_session(
                 llm_agent_id=llm_agent_id,
-                code=command # catコマンドを実行
+                code=command
             )
             if sandbox_entry.status == SandboxStatus.SUCCESS:
                 return f"File content:\n{sandbox_entry.execution_result}"
@@ -127,27 +173,27 @@ class WriteFileTool(BaseTool):
     def _run(self, llm_agent_id: str, file_path: str, content: str, append: bool = False, run_manager: Optional[RunnableConfig] = None) -> str:
         full_path = f"{config.SHARED_DIR_CONTAINER_PATH}/{file_path.lstrip('/')}"
         
-        # 使用するリダイレクト演算子を決定
         redirect_operator = ">>" if append else ">"
         
-        # ◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️↓修正開始◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️
-        # here-document を使用して、安全にマルチラインのコンテンツをファイルに書き込む
-        # EOF マーカーをユニークにするために UUID を利用（衝突リスクをさらに減らすため）
-        eof_marker = "EOF_" + str(uuid.uuid4()).replace('-', '') # ユニークなEOFマーカーを生成
+        # ディレクトリが存在しない場合は作成するコマンドを前置
+        dest_dir = os.path.dirname(full_path)
+        mkdir_cmd = ""
+        if dest_dir and dest_dir != config.SHARED_DIR_CONTAINER_PATH:
+            mkdir_cmd = f"mkdir -p \"{dest_dir}\" && "
 
-        # f-string を完全に避け、純粋な文字列連結でコマンドを構築
-        command = (
-            "bash -c 'cat <<" + eof_marker + "\n"
-            + content + "\n" +
-            eof_marker + " " + redirect_operator + " " + full_path + "'"
-        )
-        # ◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️↑修正終わり◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️◾️
+        # contentを16進数でエンコードし、xxd -r -p でデコードしてファイルに書き込む
+        # これが最もシェル特殊文字に対して堅牢な方法
+        encoded_content = content.encode('utf-8').hex()
         
+        command_script = (
+            f"{mkdir_cmd}echo '{encoded_content}' | xxd -r -p {redirect_operator} \"{full_path}\""
+        )
+            
         print(f"WriteFileTool: LLM agent {llm_agent_id} requested to write to file: {full_path}, append: {append}")
         try:
             sandbox_entry = self.sandbox_manager_service.provision_and_execute_sandbox_session(
                 llm_agent_id=llm_agent_id,
-                code=command
+                code=command_script,
             )
             if sandbox_entry.status == SandboxStatus.SUCCESS:
                 return f"Successfully {'appended to' if append else 'wrote to'} file {file_path}. Output:\n{sandbox_entry.execution_result}"
@@ -244,9 +290,9 @@ class CheckSyntaxTool(BaseTool):
         command = ""
 
         if language == "python":
-            command = f"python -m py_compile {full_path}"
+            command = f"python -m py_compile \"{full_path}\""
         elif language == "nodejs":
-            command = f"node -c {full_path}"
+            command = f"node -c \"{full_path}\""
         else:
             return f"Error: Unsupported language '{language}'. Please specify 'python' or 'nodejs'."
 
@@ -348,7 +394,7 @@ class ListDiskSpaceTool(BaseTool):
     sandbox_manager_service: SandboxManagerService
 
     def _run(self, llm_agent_id: str, run_manager: Optional[RunnableConfig] = None) -> str:
-        command = f"df -h {config.SHARED_DIR_CONTAINER_PATH}"
+        command = f"df -h \"{config.SHARED_DIR_CONTAINER_PATH}\"" # パスをダブルクォートで囲む
         print(f"ListDiskSpaceTool: LLM agent {llm_agent_id} requested to list disk space.")
         try:
             sandbox_entry = self.sandbox_manager_service.provision_and_execute_sandbox_session(
@@ -368,3 +414,369 @@ class ListDiskSpaceTool(BaseTool):
 
     async def _arun(self, llm_agent_id: str, run_manager: Optional[RunnableConfig] = None) -> str:
         return self._run(llm_agent_id=llm_agent_id, run_manager=run_manager)
+
+class DownloadFileTool(BaseTool):
+    name: str = "download_file_from_internet"
+    description: str = "Downloads a file from a specified URL to a path within the persistent sandbox's shared directory. Allows custom HTTP headers and methods. Requires a base image with `curl` installed. Returns HTTP status code upon completion."
+    args_schema: Type[BaseModel] = DownloadFileInput
+    sandbox_manager_service: SandboxManagerService
+
+    def _run(self, llm_agent_id: str, url: str, destination_path: str, headers: Optional[str] = None, method: str = "GET", base_image: Optional[str] = None, run_manager: Optional[RunnableConfig] = None) -> str:
+        full_dest_path = f"{config.SHARED_DIR_CONTAINER_PATH}/{destination_path.lstrip('/')}"
+        
+        # まずディレクトリが存在するか確認し、なければ作成する
+        dest_dir = os.path.dirname(full_dest_path) # os.path.dirname を使用
+        if dest_dir and dest_dir != config.SHARED_DIR_CONTAINER_PATH: # ルートディレクトリ自体でなければ
+            mkdir_command = f"mkdir -p \"{dest_dir}\"" # ダブルクォートで囲む
+            print(f"DownloadFileTool: Ensuring directory {dest_dir} exists.")
+            mkdir_entry = self.sandbox_manager_service.provision_and_execute_sandbox_session(
+                llm_agent_id=llm_agent_id,
+                code=mkdir_command,
+                base_image=base_image
+            )
+            if mkdir_entry.exit_code != 0:
+                return f"Failed to create destination directory {dest_dir}. Error: {mkdir_entry.error_message}. Output: {mkdir_entry.execution_result}"
+
+        # ヘッダーをパースしてcurlコマンドに追加
+        header_commands = []
+        if headers:
+            try:
+                headers_dict = json.loads(headers)
+                for key, value in headers_dict.items():
+                    header_commands.append(f"-H '{key}: {value}'")
+            except json.JSONDecodeError:
+                return f"Error: Invalid JSON format for headers: {headers}"
+        header_str = " ".join(header_commands)
+
+        # curl を使用してファイルをダウンロード
+        # -sSL: silent, show errors, follow redirects
+        # -X {method}: HTTPメソッドを指定
+        # -o {full_dest_path}: 出力ファイルパス (ダブルクォートで囲む)
+        # -w "HTTP_STATUS:%{http_code}": HTTPステータスコードをstdoutの最後に出力
+        command = (
+            f"curl -sSL -X {method} {header_str} -o \"{full_dest_path}\" "
+            f"-w 'HTTP_STATUS:%{{http_code}}' '{url}'"
+        )
+        print(f"DownloadFileTool: LLM agent {llm_agent_id} requested to download from {url} to {full_dest_path} with method {method} and headers: {headers}.")
+        try:
+            sandbox_entry = self.sandbox_manager_service.provision_and_execute_sandbox_session(
+                llm_agent_id=llm_agent_id,
+                code=command,
+                base_image=base_image
+            )
+            
+            # HTTPステータスコードの抽出
+            http_status = "N/A"
+            clean_output = sandbox_entry.execution_result
+            if "HTTP_STATUS:" in sandbox_entry.execution_result:
+                parts = sandbox_entry.execution_result.split("HTTP_STATUS:")
+                clean_output = parts[0].strip()
+                http_status = parts[-1].strip()
+
+            if sandbox_entry.status == SandboxStatus.SUCCESS and sandbox_entry.exit_code == 0:
+                return (f"Successfully downloaded file from {url} to {destination_path}. "
+                        f"HTTP Status: {http_status}.\nOutput:\n{clean_output}")
+            else:
+                error_detail = sandbox_entry.error_message if sandbox_entry.error_message else "No specific error message."
+                output_detail = clean_output if clean_output else "No specific output."
+                return (f"Failed to download file from {url} to {destination_path}. "
+                        f"HTTP Status: {http_status}. Exit code: {sandbox_entry.exit_code}\n"
+                        f"Error:\n{error_detail}\n"
+                        f"Output:\n{output_detail}")
+        except Exception as e:
+            return f"Error downloading file in persistent sandbox: {str(e)}"
+
+    async def _arun(self, llm_agent_id: str, url: str, destination_path: str, headers: Optional[str] = None, method: str = "GET", base_image: Optional[str] = None, run_manager: Optional[RunnableConfig] = None) -> str:
+        return self._run(llm_agent_id=llm_agent_id, url=url, destination_path=destination_path, headers=headers, method=method, base_image=base_image, run_manager=run_manager)
+
+class UploadFileTool(BaseTool):
+    name: str = "upload_file_to_internet"
+    description: str = "Uploads a file from the persistent sandbox's shared directory to a specified URL. Allows custom HTTP headers and methods. Requires a base image with `curl` installed. Returns HTTP status code upon completion."
+    args_schema: Type[BaseModel] = UploadFileInput
+    sandbox_manager_service: SandboxManagerService
+
+    def _run(self, llm_agent_id: str, file_path: str, destination_url: str, headers: Optional[str] = None, method: str = "POST", base_image: Optional[str] = None, run_manager: Optional[RunnableConfig] = None) -> str:
+        full_file_path = f"{config.SHARED_DIR_CONTAINER_PATH}/{file_path.lstrip('/')}"
+        
+        # ヘッダーをパースしてcurlコマンドに追加
+        header_commands = []
+        content_type_from_headers = None
+        if headers:
+            try:
+                headers_dict = json.loads(headers)
+                for key, value in headers_dict.items():
+                    if key.lower() == 'content-type':
+                        content_type_from_headers = value
+                    header_commands.append(f"-H '{key}: {value}'")
+            except json.JSONDecodeError:
+                return f"Error: Invalid JSON format for headers: {headers}"
+        header_str = " ".join(header_commands)
+
+        # Content-Typeに基づき、-d (raw data) または -F (form-data) を使用
+        # PUT/PATCHの場合は、Content-Typeが明示的にmultipartでなければ-dを優先
+        data_upload_part = ""
+        # ファイルパスもダブルクォートで囲む
+        if content_type_from_headers and "multipart/form-data" not in content_type_from_headers.lower():
+            # Content-Typeがmultipart/form-data以外の場合、ファイルをリクエストボディとして送信
+            data_upload_part = f"-d \"@{full_file_path}\""
+        elif method.upper() in ["PUT", "PATCH"]:
+            # PUT/PATCHリクエストの場合、Content-Typeが指定されていないか、
+            # 特にmultipart/form-dataでない場合は、ファイルをリクエストボディとして送信
+            data_upload_part = f"-d \"@{full_file_path}\""
+        else:
+            # それ以外の場合（POSTなど）、デフォルトでファイルをフォームデータとして送信
+            data_upload_part = f"-F \"file=@{full_file_path}\""
+            
+        command = (
+            f"curl -sSL -X {method} {header_str} {data_upload_part} "
+            f"-w 'HTTP_STATUS:%{{http_code}}' '{destination_url}'"
+        )
+        print(f"UploadFileTool: LLM agent {llm_agent_id} requested to upload {full_file_path} to {destination_url} with method {method} and headers: {headers}.")
+        try:
+            sandbox_entry = self.sandbox_manager_service.provision_and_execute_sandbox_session(
+                llm_agent_id=llm_agent_id,
+                code=command,
+                base_image=base_image
+            )
+
+            # HTTPステータスコードの抽出
+            http_status = "N/A"
+            clean_output = sandbox_entry.execution_result
+            if "HTTP_STATUS:" in sandbox_entry.execution_result:
+                parts = sandbox_entry.execution_result.split("HTTP_STATUS:")
+                clean_output = parts[0].strip()
+                http_status = parts[-1].strip()
+
+            if sandbox_entry.status == SandboxStatus.SUCCESS and sandbox_entry.exit_code == 0:
+                return (f"Successfully uploaded file {file_path} to {destination_url}. "
+                        f"HTTP Status: {http_status}.\nOutput:\n{clean_output}")
+            else:
+                error_detail = sandbox_entry.error_message if sandbox_entry.error_message else "No specific error message."
+                output_detail = clean_output if clean_output else "No specific output."
+                return (f"Failed to upload file {file_path} to {destination_url}. "
+                        f"HTTP Status: {http_status}. Exit code: {sandbox_entry.exit_code}\n"
+                        f"Error:\n{error_detail}\n"
+                        f"Output:\n{output_detail}")
+        except Exception as e:
+            return f"Error uploading file in persistent sandbox: {str(e)}"
+
+    async def _arun(self, llm_agent_id: str, file_path: str, destination_url: str, headers: Optional[str] = None, method: str = "POST", base_image: Optional[str] = None, run_manager: Optional[RunnableConfig] = None) -> str:
+        return self._run(llm_agent_id=llm_agent_id, file_path=file_path, destination_url=destination_url, headers=headers, method=method, base_image=base_image, run_manager=run_manager)
+
+class DownloadWebpageRecursivelyTool(BaseTool):
+    name: str = "download_webpage_recursively"
+    description: str = "Downloads a webpage and its linked resources (images, CSS, JS, etc.) recursively to a specified directory. Useful for offline browsing or analyzing a site structure. Requires a base image with `wget` installed."
+    args_schema: Type[BaseModel] = DownloadWebpageRecursivelyInput
+    sandbox_manager_service: SandboxManagerService
+
+    def _run(self, llm_agent_id: str, url: str, destination_dir: str, max_depth: int = 5, accept_regex: Optional[str] = None, base_image: Optional[str] = None, run_manager: Optional[RunnableConfig] = None) -> str:
+        full_dest_dir = f"{config.SHARED_DIR_CONTAINER_PATH}/{destination_dir.lstrip('/')}"
+        
+        # まずディレクトリが存在するか確認し、なければ作成する
+        mkdir_command = f"mkdir -p \"{full_dest_dir}\"" # ダブルクォートで囲む
+        print(f"DownloadWebpageRecursivelyTool: Ensuring directory {full_dest_dir} exists.")
+        mkdir_entry = self.sandbox_manager_service.provision_and_execute_sandbox_session(
+            llm_agent_id=llm_agent_id,
+            code=mkdir_command,
+            base_image=base_image
+        )
+        if mkdir_entry.exit_code != 0:
+            return f"Failed to create destination directory {full_dest_dir}. Error: {mkdir_entry.error_message}. Output: {mkdir_entry.execution_result}"
+
+        # wget -r --level=N --no-parent --directory-prefix=PATH --convert-links --page-requisites URL
+        # -r: 再帰的ダウンロード
+        # --level=N: 再帰深度
+        # --no-parent: 親ディレクトリに遡らない
+        # --directory-prefix=PATH: 出力ディレクトリ (ダブルクォートで囲む)
+        # --convert-links: ローカルパスに変換
+        # --page-requisites: HTML表示に必要な全てのファイル（画像、CSS、JS）をダウンロード
+        command_parts = [
+            "wget -r",
+            f"--level={max_depth}",
+            f"--directory-prefix=\"{full_dest_dir}\"", # ダブルクォートで囲む
+            "--convert-links",
+            "--page-requisites",
+            "--no-parent",
+            "-nv" # no verbose output, only errors and progress
+        ]
+        
+        if accept_regex:
+            command_parts.append(f"--accept-regex='{accept_regex}'") # シェルインジェクション対策でシングルクォートで囲む
+
+        command_parts.append(f"'{url}'") # 最後にURL
+
+        command = " ".join(command_parts)
+
+        print(f"DownloadWebpageRecursivelyTool: LLM agent {llm_agent_id} requested recursive download of {url} to {full_dest_dir}.")
+        try:
+            sandbox_entry = self.sandbox_manager_service.provision_and_execute_sandbox_session(
+                llm_agent_id=llm_agent_id,
+                code=command,
+                base_image=base_image
+            )
+            if sandbox_entry.status == SandboxStatus.SUCCESS and sandbox_entry.exit_code == 0:
+                # wget -nv の場合、成功時は出力が少ないか、進行状況バーのみになることが多い。
+                # ユーザーへの情報として、ダウンロードされたファイルのリストやディレクトリ内容を提供すると良いかもしれないが、
+                # ここでは簡潔に成功を伝える。
+                return (f"Successfully downloaded webpage and resources from {url} to {destination_dir}. "
+                        f"Check the directory {destination_dir} for content.\nOutput:\n{sandbox_entry.execution_result}")
+            else:
+                error_detail = sandbox_entry.error_message if sandbox_entry.error_message else "No specific error message."
+                output_detail = sandbox_entry.execution_result if sandbox_entry.execution_result else "No specific output."
+                return (f"Failed to download webpage recursively from {url} to {destination_dir}. Exit code: {sandbox_entry.exit_code}\n"
+                        f"Error:\n{error_detail}\n"
+                        f"Output:\n{output_detail}")
+        except Exception as e:
+            return f"Error downloading webpage recursively in persistent sandbox: {str(e)}"
+
+    async def _arun(self, llm_agent_id: str, url: str, destination_dir: str, max_depth: int = 5, accept_regex: Optional[str] = None, base_image: Optional[str] = None, run_manager: Optional[RunnableConfig] = None) -> str:
+        return self._run(llm_agent_id=llm_agent_id, url=url, destination_dir=destination_dir, max_depth=max_depth, accept_regex=accept_regex, base_image=base_image, run_manager=run_manager)
+
+class FindFilesInSandboxTool(BaseTool):
+    name: str = "find_files_in_sandbox"
+    description: str = "Searches for files and directories in the persistent sandbox's shared directory. You can specify a starting path, file name pattern, file type, and maximum search depth."
+    args_schema: Type[BaseModel] = FindFilesInSandboxInput
+    sandbox_manager_service: SandboxManagerService
+
+    def _run(self, llm_agent_id: str, search_path: str, name_pattern: Optional[str] = None, file_type: Optional[str] = None, max_depth: Optional[int] = None, run_manager: Optional[RunnableConfig] = None) -> str:
+        full_search_path = f"{config.SHARED_DIR_CONTAINER_PATH}/{search_path.lstrip('/')}"
+        command_parts = ["find", f"\"{full_search_path}\""] # パスをダブルクォートで囲む
+
+        if max_depth is not None:
+            command_parts.append(f"-maxdepth {max_depth}")
+        if file_type:
+            command_parts.append(f"-type {file_type}")
+        if name_pattern:
+            # -name のパターンはシェルによって展開されないようシングルクォートのまま
+            command_parts.append(f"-name '{name_pattern}'")
+
+        command = " ".join(command_parts)
+        print(f"FindFilesInSandboxTool: LLM agent {llm_agent_id} requested file search: {command}")
+
+        try:
+            sandbox_entry = self.sandbox_manager_service.provision_and_execute_sandbox_session(
+                llm_agent_id=llm_agent_id,
+                code=command
+            )
+            if sandbox_entry.status == SandboxStatus.SUCCESS and sandbox_entry.exit_code == 0:
+                # Remove the shared directory prefix for cleaner output for the agent
+                results = sandbox_entry.execution_result.strip().split('\n')
+                cleaned_results = [
+                    res.replace(f"{config.SHARED_DIR_CONTAINER_PATH}/", "").lstrip('/')
+                    for res in results if res
+                ]
+                if not cleaned_results:
+                    return f"No files found matching the criteria in {search_path}."
+                return f"Files found in {search_path}:\n" + "\n".join(cleaned_results)
+            else:
+                error_detail = sandbox_entry.error_message if sandbox_entry.error_message else "No specific error message."
+                output_detail = sandbox_entry.execution_result if sandbox_entry.execution_result else "No specific output."
+                return (f"Failed to find files in sandbox.\n"
+                        f"Error:\n{error_detail}\n"
+                        f"Output:\n{output_detail}")
+        except Exception as e:
+            return f"Error searching files in persistent sandbox: {str(e)}"
+
+    async def _arun(self, llm_agent_id: str, search_path: str, name_pattern: Optional[str] = None, file_type: Optional[str] = None, max_depth: Optional[int] = None, run_manager: Optional[RunnableConfig] = None) -> str:
+        return self._run(llm_agent_id=llm_agent_id, search_path=search_path, name_pattern=name_pattern, file_type=file_type, max_depth=max_depth, run_manager=run_manager)
+
+class GrepFileContentInSandboxTool(BaseTool):
+    name: str = "grep_file_content_in_sandbox"
+    description: str = "Searches for a specified pattern within the content of files in the persistent sandbox's shared directory. Can search recursively and case-insensitively."
+    args_schema: Type[BaseModel] = GrepFileContentInSandboxInput
+    sandbox_manager_service: SandboxManagerService
+
+    def _run(self, llm_agent_id: str, file_path: str, pattern: str, recursive: bool = False, case_insensitive: bool = False, line_numbers: bool = False, run_manager: Optional[RunnableConfig] = None) -> str:
+        full_file_path = f"{config.SHARED_DIR_CONTAINER_PATH}/{file_path.lstrip('/')}"
+        command_parts = ["grep"]
+
+        if recursive:
+            command_parts.append("-r")
+        if case_insensitive:
+            command_parts.append("-i")
+        if line_numbers:
+            command_parts.append("-n")
+        
+        # Pattern and path must be last
+        command_parts.append(f"'{pattern}'") # Escape pattern to prevent shell interpretation
+        command_parts.append(f"\"{full_file_path}\"") # パスをダブルクォートで囲む
+
+        command = " ".join(command_parts)
+        print(f"GrepFileContentInSandboxTool: LLM agent {llm_agent_id} requested grep: {command}")
+
+        try:
+            sandbox_entry = self.sandbox_manager_service.provision_and_execute_sandbox_session(
+                llm_agent_id=llm_agent_id,
+                code=command
+            )
+            if sandbox_entry.status == SandboxStatus.SUCCESS and (sandbox_entry.exit_code == 0 or sandbox_entry.exit_code == 1): # exit code 1 means no lines selected
+                if sandbox_entry.execution_result.strip():
+                    # Remove the shared directory prefix for cleaner output for the agent
+                    results = sandbox_entry.execution_result.strip().split('\n')
+                    cleaned_results = [
+                        res.replace(f"{config.SHARED_DIR_CONTAINER_PATH}/", "").lstrip('/')
+                        for res in results if res
+                    ]
+                    return f"Pattern '{pattern}' found in files:\n" + "\n".join(cleaned_results)
+                else:
+                    return f"Pattern '{pattern}' not found in {file_path}."
+            else:
+                error_detail = sandbox_entry.error_message if sandbox_entry.error_message else "No specific error message."
+                output_detail = sandbox_entry.execution_result if sandbox_entry.execution_result else "No specific output."
+                return (f"Failed to grep file content in sandbox.\n"
+                        f"Error:\n{error_detail}\n"
+                        f"Output:\n{output_detail}")
+        except Exception as e:
+            return f"Error searching file content in persistent sandbox: {str(e)}"
+
+    async def _arun(self, llm_agent_id: str, file_path: str, pattern: str, recursive: bool = False, case_insensitive: bool = False, line_numbers: bool = False, run_manager: Optional[RunnableConfig] = None) -> str:
+        return self._run(llm_agent_id=llm_agent_id, file_path=file_path, pattern=pattern, recursive=recursive, case_insensitive=case_insensitive, line_numbers=line_numbers, run_manager=run_manager)
+
+class GetSystemInfoTool(BaseTool):
+    name: str = "get_system_info_in_sandbox"
+    description: str = "Retrieves detailed system information from the persistent sandbox, such as OS and CPU details, or memory usage."
+    args_schema: Type[BaseModel] = GetSystemInfoInput
+    sandbox_manager_service: SandboxManagerService
+
+    def _run(self, llm_agent_id: str, info_type: str, run_manager: Optional[RunnableConfig] = None) -> str:
+        command = ""
+        if info_type == "os_and_cpu":
+            # OS type and kernel, then CPU info
+            command = "uname -a && cat /proc/cpuinfo | grep 'model name' | uniq && cat /proc/cpuinfo | grep 'processor' | wc -l"
+        elif info_type == "memory":
+            # Memory usage in human-readable format
+            command = "cat /proc/meminfo" # 'free -h' is simpler but 'cat /proc/meminfo' gives more raw details
+        else:
+            return "Error: Invalid info_type. Please choose 'os_and_cpu' or 'memory'."
+
+        print(f"GetSystemInfoTool: LLM agent {llm_agent_id} requested system info: {info_type}")
+        try:
+            sandbox_entry = self.sandbox_manager_service.provision_and_execute_sandbox_session(
+                llm_agent_id=llm_agent_id,
+                code=command
+            )
+            if sandbox_entry.status == SandboxStatus.SUCCESS:
+                if info_type == "os_and_cpu":
+                    output_lines = sandbox_entry.execution_result.strip().split('\n')
+                    uname_output = output_lines[0].strip() if output_lines else "N/A"
+                    cpu_model = output_lines[1].strip() if len(output_lines) > 1 else "N/A"
+                    num_cpus = output_lines[2].strip() if len(output_lines) > 2 else "N/A"
+                    return (f"System Information (OS & CPU):\n"
+                            f"  OS/Kernel: {uname_output}\n"
+                            f"  CPU Model: {cpu_model}\n"
+                            f"  Number of CPUs: {num_cpus}")
+                elif info_type == "memory":
+                    return f"System Information (Memory):\n{sandbox_entry.execution_result.strip()}"
+                else:
+                    return f"System Information ({info_type}):\n{sandbox_entry.execution_result.strip()}"
+            else:
+                error_detail = sandbox_entry.error_message if sandbox_entry.error_message else "No specific error message."
+                output_detail = sandbox_entry.execution_result if sandbox_entry.execution_result else "No specific output."
+                return (f"Failed to get system info for {info_type}.\n"
+                        f"Error:\n{error_detail}\n"
+                        f"Output:\n{output_detail}")
+        except Exception as e:
+            return f"Error getting system info in persistent sandbox: {str(e)}"
+
+    async def _arun(self, llm_agent_id: str, info_type: str, run_manager: Optional[RunnableConfig] = None) -> str:
+        return self._run(llm_agent_id=llm_agent_id, info_type=info_type, run_manager=run_manager)
